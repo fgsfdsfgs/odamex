@@ -342,9 +342,15 @@ void xbox_MountPartitions()
 	xbox_MountDevice('E', DeviceE); // Standard save partition
 	xbox_MountDevice('F', DeviceF); // Non-stock partition - modded consoles only
 	xbox_MountDevice('G', DeviceG); // Non-stock partition - modded consoles only
-	xbox_MountDevice('T', DeviceT); // Odamex's unique TDATA - peristent save data (configs, etc.) - automounted
-	xbox_MountDevice('U', DeviceU); // Odamex's unique UDATA - user save data (save games) - automounted
 	xbox_MountDevice('Z', DeviceZ); // Cache partition - appropriate place for temporary files - automounted
+
+	// the TDATA and UDATA directories are not in fact automounted like they are in XDK,
+	// so we have to ensure that they exist first
+	CreateDirectory("E:\\TDATA\\" XBOX_TITLE_ID, NULL);
+	CreateDirectory("E:\\UDATA\\" XBOX_TITLE_ID, NULL);
+
+	xbox_MountDevice('T', DeviceT); // Odamex's unique TDATA - peristent save data (configs, etc.)
+	xbox_MountDevice('U', DeviceU); // Odamex's unique UDATA - user save data (save games)
 }
 
 //
