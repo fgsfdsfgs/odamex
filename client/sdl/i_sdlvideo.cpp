@@ -1222,7 +1222,7 @@ void ISDL20Window::setRendererDriver()
 	// Preferred ordering of drivers
 	const char* drivers[] =
 	{
-#if 0
+#ifdef _XBOX
 		"xbox_pbkit",
 #endif
 		"direct3d",
