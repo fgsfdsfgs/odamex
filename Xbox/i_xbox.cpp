@@ -22,41 +22,57 @@
 //-----------------------------------------------------------------------------
 #ifdef _XBOX
 
-#include <xtl.h>
+#include <windows.h>
+#include <nxdk/mount.h>
+#include <hal/debug.h>
+#include <hal/video.h>
+#include <hal/xbox.h>
+#include <xboxkrnl/xboxkrnl.h>
+#include <errno.h>
+#include <string.h>
+
 #include <iostream>
 #include <string>
-#include <iomanip>
 #include <sstream>
 #include <list>
-#include <errno.h>
+
+#include <SDL.h>
+#include <SDL_mixer.h>
 
 #include "i_xbox.h"
 #include "i_system.h"
+#include "c_console.h"
 
 using namespace std;
 
-// Xbox drive letters
-#define DriveC "\\??\\C:"
-#define DriveD "\\??\\D:"
-#define DriveE "\\??\\E:"
-#define DriveF "\\??\\F:"
-#define DriveG "\\??\\G:"
-#define DriveT "\\??\\T:"
-#define DriveU "\\??\\U:"
-#define DriveZ "\\??\\Z:"
-
 // Partition device mapping
 #define DeviceC "\\Device\\Harddisk0\\Partition2"
-#define CdRom "\\Device\\CdRom0"
+#define CdRom   "\\Device\\CdRom0"
 #define DeviceE "\\Device\\Harddisk0\\Partition1"
 #define DeviceF "\\Device\\Harddisk0\\Partition6"
 #define DeviceG "\\Device\\Harddisk0\\Partition7"
-#define DeviceT "\\Device\\Harddisk0\\Partition1\\TDATA\\4F444D58"
-#define DeviceU "\\Device\\Harddisk0\\Partition1\\UDATA\\4F444D58"
+#define DeviceT "\\Device\\Harddisk0\\Partition1\\TDATA\\" XBOX_TITLE_ID
+#define DeviceU "\\Device\\Harddisk0\\Partition1\\UDATA\\" XBOX_TITLE_ID
 #define DeviceZ "\\Device\\Harddisk0\\Partition5"
 
 // Custom LAUNCH_DATA struct for external XBE execution from AG_Execute()
 #define AG_LAUNCH_MAGIC 0x41474152
+
+// nxdk lacks these definitions for now
+#define MAX_LAUNCH_DATA_SIZE 3072
+#define LDT_TITLE 0
+#define LDT_FROM_DASHBOARD 2
+#define LDT_FROM_DEBUGGER_CMDLINE 3
+
+typedef struct _LAUNCH_DATA
+{
+	BYTE Data[MAX_LAUNCH_DATA_SIZE];
+} LAUNCH_DATA, *PLAUNCH_DATA;
+
+typedef struct _LD_FROM_DEBUGGER_CMDLINE
+{
+	CHAR szCmdLine[MAX_LAUNCH_DATA_SIZE];
+} LD_FROM_DEBUGGER_CMDLINE, *PLD_FROM_DEBUGGER_CMDLINE;
 
 typedef struct {
 	DWORD magic;               // Test this against AG_LAUNCH_MAGIC to know this special struct was used
@@ -81,31 +97,100 @@ typedef struct {
 	CHAR reserved[MAX_LAUNCH_DATA_SIZE-757];
 } CUSTOM_LAUNCH_DATA, *PCUSTOM_LAUNCH_DATA;
 
-#define INVALID_FILE_ATTRIBUTES -1
-
-typedef struct _STRING 
-{
-	USHORT	Length;
-	USHORT	MaximumLength;
-	PSTR	Buffer;
-} UNICODE_STRING, *PUNICODE_STRING, ANSI_STRING, *PANSI_STRING;
-
-// These are undocumented Xbox functions that are not in the XDK includes.
-// They can be found by looking through the symbols found in the Xbox libs (xapilib.lib mostly).
-extern "C" XBOXAPI LONG WINAPI IoCreateSymbolicLink(IN PUNICODE_STRING SymbolicLinkName,IN PUNICODE_STRING DeviceName);
-extern "C" XBOXAPI LONG WINAPI IoDeleteSymbolicLink(IN PUNICODE_STRING SymbolicLinkName);
-extern "C" XBOXAPI INT WINAPI XWriteTitleInfoAndRebootA(LPVOID,LPVOID,DWORD,DWORD,LPVOID);
-extern "C" XBOXAPI LONG WINAPI HalWriteSMBusValue(UCHAR devddress, UCHAR offset, UCHAR writedw, DWORD data);
-
 // External function declarations
 extern int    I_Main(int argc, char *argv[]);		// i_main.cpp
 extern size_t I_BytesToMegabytes (size_t Bytes);	// i_system.cpp
 
-//Globals
+// Globals
 static std::list<void (*)(void)>  ExitFuncList;
 static DWORD                      LauncherID;
 static char                      *LauncherXBE = NULL;
 static bool                       Xbox_RROD = false; // Novelty - Red Ring of DOOM!
+static int                        Xbox_VidMode = 0; // 640, 720, 1080, default 640
+
+// Network settings
+// I have no idea how to read these from EEPROM or wherever they are stored,
+// so for now we just pass them in as command line
+static char net_xbox_ip[20] = "0.0.0.0";
+static char net_xbox_netmask[20] = "0.0.0.0";
+static char net_xbox_gateway[20] = "0.0.0.0";
+static char net_xbox_dns[20] = "0.0.0.0";
+
+/* LWIP network driver stuff */
+
+// nxdk lacks something like XNet, but instead has the much lower level LWIP
+// this means we have to bring up the network interface manually
+
+static BOOL xnet_inited = FALSE;
+
+extern "C"
+{
+
+#include <lwip/debug.h>
+#include <lwip/dhcp.h>
+#include <lwip/init.h>
+#include <lwip/netif.h>
+#include <lwip/sys.h>
+#include <lwip/tcpip.h>
+#include <lwip/timeouts.h>
+#include <netif/etharp.h>
+#include <pktdrv.h>
+
+// interface settings
+static ip4_addr_t xnet_ip;
+static ip4_addr_t xnet_netmask;
+static ip4_addr_t xnet_gateway;
+static ip4_addr_t xnet_dns;
+
+// this is referenced in the LWIP driver
+struct netif *g_pnetif;
+struct netif nforce_netif;
+
+// this is not defined in any headers
+err_t nforceif_init(struct netif *netif);
+
+static void tcpip_init_done(void *arg)
+{
+	sys_sem_t *init_complete = (sys_sem_t *)arg;
+	sys_sem_signal(init_complete);
+}
+
+static void packet_timer(void *arg)
+{
+	#define PKT_TMR_INTERVAL 5 /* ms */
+	LWIP_UNUSED_ARG(arg);
+	Pktdrv_ReceivePackets();
+	sys_timeout(PKT_TMR_INTERVAL, packet_timer, NULL);
+}
+
+}
+
+/* end LWIP stuff */
+
+//
+// xbox_GetLaunchData
+// nxdk doesn't have XGetLaunchData yet, so we make do
+//
+DWORD xbox_GetLaunchData(DWORD *outType, void *outData)
+{
+	if(!LaunchDataPage)
+		return EFAULT;
+	*outType = LaunchDataPage->Header.dwLaunchDataType;
+	memcpy(outData, LaunchDataPage->LaunchData, MAX_LAUNCH_DATA_SIZE);
+	return ERROR_SUCCESS;
+}
+
+//
+// xbox_RecordLauncherXBE
+//
+void xbox_RecordLauncherXBE(char *szLauncherXBE, DWORD dwID)
+{
+	if(szLauncherXBE  && !LauncherXBE)
+	{
+		LauncherXBE = strdup(szLauncherXBE);
+		LauncherID = dwID;
+	}
+}
 
 //
 // xbox_Getenv 
@@ -150,100 +235,31 @@ char *xbox_GetCWD(char *buf, size_t size)
 }
 
 //
-// xbox_InetNtoa
-//
-char *xbox_InetNtoa(struct in_addr in)
-{
-	static char addr[32];
-
-	sprintf(addr, "%d.%d.%d.%d",
-				in.S_un.S_un_b.s_b1,
-				in.S_un.S_un_b.s_b2,
-				in.S_un.S_un_b.s_b3,
-				in.S_un.S_un_b.s_b4);
-
-	return addr;
-}
-
-//
-// xbox_GetHostByName
-//
-// Custom implementation for Xbox
-//
-struct hostent *xbox_GetHostByName(const char *name)
-{
-	static struct hostent *he = NULL;
-	unsigned long          addr = INADDR_NONE;
-	WSAEVENT               hEvent;
-	XNDNS                 *pDns = NULL;
-	INT                    err;
-	
-	if(!name)
-		return NULL;
-
-	// This data is static and it should not be freed.
-	if(!he)
-	{
-		he = (struct hostent *)malloc(sizeof(struct hostent));
-		if(!he)
-		{
-			// Failed to allocate!
-			return NULL;
-		}
-
-		he->h_addr_list = (char **)malloc(sizeof(char*));
-		he->h_addr_list[0] = (char *)malloc(sizeof(struct in_addr));
-	}
-
-	if(isdigit(name[0]))
-		addr = inet_addr(name);
-
-	if(addr != INADDR_NONE)
-		*(int *)he->h_addr_list[0] = addr;
-	else
-	{
-		hEvent = WSACreateEvent();
-		err = XNetDnsLookup(name, hEvent, &pDns);
-
-		WaitForSingleObject( (HANDLE)hEvent, INFINITE);
-
-		if(!pDns || pDns->iStatus != 0)
-			return NULL;
-
-		memcpy(he->h_addr_list[0], pDns->aina, sizeof(struct in_addr));
-
-		XNetDnsRelease(pDns);
-		WSACloseEvent(hEvent);
-	}
-
-	return he;
-}
-
-//
 // xbox_GetHostname
 //
 // Custom implementation for Xbox
 //
 int xbox_GetHostname(char *name, int namelen)
 {
-	XNADDR xna;
-	DWORD  dwState;
-
-	if(name)
+	if (!xnet_inited || !name)
 	{
-		if(namelen > 0)
-		{
-			dwState = XNetGetTitleXnAddr(&xna);
-			XNetInAddrToString(xna.ina, name, namelen);
+		errno = EFAULT;
+		return -1;
+	}
 
+	const ip4_addr_t *localaddr = netif_ip4_addr(g_pnetif);
+	if (localaddr)
+	{
+		char *ipstr = ip4addr_ntoa(localaddr);
+		if (ipstr && *ipstr)
+		{
+			strncpy(name, ipstr, namelen);
+			name[namelen - 1] = 0;
 			return 0;
 		}
-		else
-			errno = EINVAL;
 	}
-	else
-		errno = EFAULT;
-	
+
+	errno = EINVAL;
 	return -1;
 }
 
@@ -253,35 +269,28 @@ int xbox_GetHostname(char *name, int namelen)
 void xbox_PrintMemoryDebug()
 {
 	extern size_t got_heapsize;
-	MEMORYSTATUS  stat;
-	static DWORD  lastmem = 0;
-	char          buf[100];
+	static ULONG lastmem;
+	MM_STATISTICS mem_stats;
+	ULONG used_bytes, avail_bytes, total_bytes;
 
 	// Get the memory status.
-	GlobalMemoryStatus(&stat);
+	mem_stats.Length = sizeof(mem_stats);
+	MmQueryStatistics(&mem_stats);
 
-	if (stat.dwAvailPhys != lastmem)
+	if (mem_stats.AvailablePages != lastmem)
 	{
-		sprintf(buf, "\nMemory Debug:\n");
-		OutputDebugString( buf );
+		avail_bytes = mem_stats.AvailablePages << 12;
+		total_bytes = mem_stats.TotalPhysicalPages << 12;
+		used_bytes = total_bytes - avail_bytes;
 
-		sprintf(buf, "Heap Size: \t%4d MB\n", got_heapsize);
-		OutputDebugString( buf );
+		debugPrint("\nMemory Debug:\n");
+		debugPrint("Heap Size:             %4u MB\n", got_heapsize);
+		debugPrint("Total Physical Memory: %8u bytes / %4u MB\n", total_bytes, I_BytesToMegabytes(total_bytes));
+		debugPrint("Used Physical Memory : %8u bytes / %4u MB\n", used_bytes, I_BytesToMegabytes(used_bytes));
+		debugPrint("Free Physical Memory : %8u bytes / %4u MB\n", avail_bytes, I_BytesToMegabytes(avail_bytes));
+		debugPrint("\n");
 
-
-		sprintf(buf, "Total Physical Memory: \t%4d bytes / %4d MB\n", stat.dwTotalPhys, I_BytesToMegabytes(stat.dwTotalPhys));
-		OutputDebugString( buf );
-
-		sprintf(buf, "Used Physical Memory : \t%4d bytes / %4d MB\n", stat.dwTotalPhys - stat.dwAvailPhys, 
-		                                                             I_BytesToMegabytes(stat.dwTotalPhys - stat.dwAvailPhys));
-		OutputDebugString( buf );
-
-		sprintf(buf, "Free Physical Memory : \t%4d bytes / %4d MB\n", stat.dwAvailPhys, I_BytesToMegabytes(stat.dwAvailPhys));
-		OutputDebugString( buf );
-
-		OutputDebugString("\n");
-
-		lastmem = stat.dwAvailPhys;
+		lastmem = mem_stats.AvailablePages;
 	}
 }
 
@@ -290,32 +299,19 @@ void xbox_PrintMemoryDebug()
 //
 // XBox device mounting
 //
-LONG xbox_MountDevice(LPSTR sSymbolicLinkName, LPSTR sDeviceName)
+BOOL xbox_MountDevice(char cDriveLetter, const char *sDeviceName)
 {
-	UNICODE_STRING deviceName;
-	deviceName.Buffer  = sDeviceName;
-	deviceName.Length = (USHORT)strlen(sDeviceName);
-	deviceName.MaximumLength = (USHORT)strlen(sDeviceName) + 1;
-
-	UNICODE_STRING symbolicLinkName;
-	symbolicLinkName.Buffer  = sSymbolicLinkName;
-	symbolicLinkName.Length = (USHORT)strlen(sSymbolicLinkName);
-	symbolicLinkName.MaximumLength = (USHORT)strlen(sSymbolicLinkName) + 1;
-
-	return IoCreateSymbolicLink(&symbolicLinkName, &deviceName);
+	const BOOL res = nxMountDrive(cDriveLetter, sDeviceName);
+	if (!res) debugPrint("mount failed: %s -> %c:\n", sDeviceName, cDriveLetter);
+	return res;
 }
 
 //
 // xbox_UnMountDevice
 //
-LONG xbox_UnMountDevice(LPSTR sSymbolicLinkName)
+BOOL xbox_UnMountDevice(char cDriveLetter)
 {
-	UNICODE_STRING  symbolicLinkName;
-	symbolicLinkName.Buffer  = sSymbolicLinkName;
-	symbolicLinkName.Length = (USHORT)strlen(sSymbolicLinkName);
-	symbolicLinkName.MaximumLength = (USHORT)strlen(sSymbolicLinkName) + 1;
-
-	return IoDeleteSymbolicLink(&symbolicLinkName);
+	return nxUnmountDrive(cDriveLetter);
 }
 
 //
@@ -342,13 +338,13 @@ LONG xbox_UnMountDevice(LPSTR sSymbolicLinkName)
 //
 void xbox_MountPartitions()
 {
-	xbox_MountDevice(DriveD, CdRom);   // DVD-ROM or start path - automounted
-	xbox_MountDevice(DriveE, DeviceE); // Standard save partition
-	xbox_MountDevice(DriveF, DeviceF); // Non-stock partition - modded consoles only
-	xbox_MountDevice(DriveG, DeviceG); // Non-stock partition - modded consoles only
-	xbox_MountDevice(DriveT, DeviceT); // Odamex's unique TDATA - peristent save data (configs, etc.) - automounted
-	xbox_MountDevice(DriveU, DeviceU); // Odamex's unique UDATA - user save data (save games) - automounted
-	xbox_MountDevice(DriveZ, DeviceZ); // Cache partition - appropriate place for temporary files - automounted
+	xbox_MountDevice('D', CdRom);   // XBE location -- automounted; will mount CdRom if not
+	xbox_MountDevice('E', DeviceE); // Standard save partition
+	xbox_MountDevice('F', DeviceF); // Non-stock partition - modded consoles only
+	xbox_MountDevice('G', DeviceG); // Non-stock partition - modded consoles only
+	xbox_MountDevice('T', DeviceT); // Odamex's unique TDATA - peristent save data (configs, etc.) - automounted
+	xbox_MountDevice('U', DeviceU); // Odamex's unique UDATA - user save data (save games) - automounted
+	xbox_MountDevice('Z', DeviceZ); // Cache partition - appropriate place for temporary files - automounted
 }
 
 //
@@ -356,37 +352,13 @@ void xbox_MountPartitions()
 //
 void xbox_UnMountPartitions()
 {
-	xbox_UnMountDevice(DriveD);
-	xbox_UnMountDevice(DriveE);
-	xbox_UnMountDevice(DriveF);
-	xbox_UnMountDevice(DriveG);
-	xbox_UnMountDevice(DriveT);
-	xbox_UnMountDevice(DriveU);
-	xbox_UnMountDevice(DriveZ);
-}
-
-//
-// xbox_InitNet
-//
-void xbox_InitNet()
-{
-	XNetStartupParams xnsp;
-
-	ZeroMemory( &xnsp, sizeof(xnsp) );
-	xnsp.cfgSizeOfStruct = sizeof(xnsp);
-
-	xnsp.cfgPrivatePoolSizeInPages = 64; // == 256kb, default = 12 (48kb)
-	xnsp.cfgEnetReceiveQueueLength = 16; // == 32kb, default = 8 (16kb)
-	xnsp.cfgIpFragMaxSimultaneous = 16; // default = 4
-	xnsp.cfgIpFragMaxPacketDiv256 = 32; // == 8kb, default = 8 (2kb)
-	xnsp.cfgSockMaxSockets = 64; // default = 64
-	xnsp.cfgSockDefaultRecvBufsizeInK = 128; // default = 16
-	xnsp.cfgSockDefaultSendBufsizeInK = 128; // default = 16
-
-	// Bypass security so we can talk to the outside world as we please
-	xnsp.cfgFlags = XNET_STARTUP_BYPASS_SECURITY;
-
-	XNetStartup( &xnsp );
+	xbox_UnMountDevice('D');
+	xbox_UnMountDevice('E');
+	xbox_UnMountDevice('F');
+	xbox_UnMountDevice('G');
+	xbox_UnMountDevice('T');
+	xbox_UnMountDevice('U');
+	xbox_UnMountDevice('Z');
 }
 
 //
@@ -394,7 +366,76 @@ void xbox_InitNet()
 //
 void xbox_CloseNetwork()
 {
-	XNetCleanup();
+	sys_untimeout(packet_timer, NULL);
+	Pktdrv_Quit();
+	xnet_inited = FALSE;
+}
+
+//
+// xbox_InitNet
+//
+void xbox_InitNet()
+{
+	sys_sem_t init_complete;
+	const ip4_addr_t *ip;
+	BOOL use_dhcp = !strcmp(net_xbox_ip, "0.0.0.0");
+
+	if(use_dhcp)
+	{
+		IP4_ADDR(&xnet_gateway, 0, 0, 0, 0);
+		IP4_ADDR(&xnet_ip, 0, 0, 0, 0);
+		IP4_ADDR(&xnet_netmask, 0, 0, 0, 0);
+	}
+	else
+	{
+		ip4addr_aton(net_xbox_ip, &xnet_ip);
+		ip4addr_aton(net_xbox_gateway, &xnet_gateway);
+		ip4addr_aton(net_xbox_netmask, &xnet_netmask);
+	}
+
+	sys_sem_new(&init_complete, 0);
+	tcpip_init(tcpip_init_done, &init_complete);
+	sys_sem_wait(&init_complete);
+	sys_sem_free(&init_complete);
+
+	g_pnetif = netif_add(&nforce_netif, &xnet_ip, &xnet_netmask, &xnet_gateway,
+			NULL, nforceif_init, ethernet_input);
+	if (!g_pnetif)
+	{
+			debugPrint("xbox_InitNet: netif_add failed\n");
+			xbox_CloseNetwork();
+			return;
+	}
+
+	netif_set_default(g_pnetif);
+	netif_set_up(g_pnetif);
+
+	if (use_dhcp)
+	{
+		dhcp_start(g_pnetif);
+	}
+
+	packet_timer(NULL);
+
+	if (use_dhcp)
+	{
+		DWORD timeout;
+		debugPrint("xbox_InitNet: Waiting for DHCP...\n");
+		timeout = GetTickCount() + 15000; // time out in 15 sec
+		while (dhcp_supplied_address(g_pnetif) == 0)
+		{
+			if (GetTickCount() > timeout)
+			{
+				debugPrint("xbox_InitNet: DHCP timed out\n");
+				xbox_CloseNetwork();
+				return;
+			}
+			NtYieldExecution();
+		}
+		debugPrint("xbox_InitNet: DHCP bound!\n");
+	}
+
+	xnet_inited = TRUE;
 }
 
 //
@@ -474,49 +515,20 @@ void xbox_DisableCustomLED()
 }
 
 //
-// xbox_RecordLauncherXBE
-//
-void xbox_RecordLauncherXBE(char *szLauncherXBE, DWORD dwID)
-{
-	if(szLauncherXBE  && !LauncherXBE)
-	{
-		LauncherXBE = strdup(szLauncherXBE);
-		LauncherID = dwID;
-	}
-}
-
-//
 // xbox_reboot 
 //
 // Exit Odamex and perform a warm reboot (no startup logo) to a launcher or dashboard
 //
 void xbox_Reboot()
 {
-	LD_LAUNCH_DASHBOARD launchData = { XLD_LAUNCH_DASHBOARD_MAIN_MENU };
-
-	// If Odamex was started from a launcher we want to return to it.
-	if(LauncherXBE)
-	{
-		size_t pathLen;
-		char  *mntDev;
-		char  *p;
-
-		// Determine the necessary D: mapping for the launcher XBE
-		p = strrchr(LauncherXBE, PATHSEPCHAR);
-		pathLen = p - LauncherXBE;
-
-		mntDev = (char *)malloc(pathLen + 1);
-		memcpy(mntDev, LauncherXBE, pathLen);
-		mntDev[pathLen] = '\0'; // This is necessary
-
-		p++; // Now conveniently Points to the start of our XBE name with path stripped off.
-
-		// Return to the launcher XBE
-		XWriteTitleInfoAndRebootA(p, mntDev, LDT_TITLE, LauncherID, &launchData);
-	}
-
-	// Return to the dashboard
-	XLaunchNewImage( NULL, (LAUNCH_DATA*)&launchData );
+	// if Odamex was started from a launcher, boot back into it, otherwise just reboot to dash
+	// NOTE: path in LauncherXBE should be of the standard DOS path form ("E:\\launcher\\default.xbe");
+	//       XLaunchXBE will allocate the launch data and set launch data type to 0xFFFFFFFF
+	Sleep(5000);
+	if (LauncherXBE)
+		XLaunchXBE(LauncherXBE);
+	else
+		XReboot();
 }
 
 //
@@ -570,14 +582,7 @@ void xbox_PrepareArgs(string cmdline, char *argv[], int &argc)
 				pos = cmdline.find(' ', oldpos);
 
 			if(pos != oldpos)
-			{
-				argv[argc] = strdup(cmdline.substr(oldpos, pos - oldpos).c_str());
-
-				if(!stricmp(argv[argc], "-rrod"))
-					Xbox_RROD = true;
-
-				argc++;
-			}
+				argv[argc++] = strdup(cmdline.substr(oldpos, pos - oldpos).c_str());
 
 			oldpos = pos + 1;
 		} while(pos != string::npos);
@@ -587,26 +592,62 @@ void xbox_PrepareArgs(string cmdline, char *argv[], int &argc)
 }
 
 //
+// xbox_CheckArgs
+//
+// Check for Xbox-specific args and read them
+//
+void xbox_CheckArgs(int argc, char *argv[])
+{
+	int i;
+	for(i = 1; i < argc; ++i)
+	{
+		if(!stricmp(argv[i], "-rrod"))
+			Xbox_RROD = true;
+		else if(i < argc - 1)
+		{
+			if(!stricmp(argv[i], "-xnet_ip"))
+				strncpy(net_xbox_ip, argv[i + 1], sizeof(net_xbox_ip) - 1);
+			else if(!stricmp(argv[i], "-xnet_gateway"))
+				strncpy(net_xbox_gateway, argv[i + 1], sizeof(net_xbox_gateway) - 1);
+			else if(!stricmp(argv[i], "-xnet_mask"))
+				strncpy(net_xbox_netmask, argv[i + 1], sizeof(net_xbox_netmask) - 1);
+			else if(!stricmp(argv[i], "-xnet_dns"))
+				strncpy(net_xbox_dns, argv[i + 1], sizeof(net_xbox_dns) - 1);
+			else if(!stricmp(argv[i], "-xvidmode"))
+				Xbox_VidMode = atoi(argv[i + 1]);
+		}
+	}
+}
+
+//
 // main
 //
 // Entry point on Xbox
 //
-void  __cdecl main()
+int main(void)
 {
 	DWORD            launchDataType;
 	LAUNCH_DATA      launchData;
 	char            *xargv[100];
-	int              xargc = 1;
+	int              xargc = 0;
+	char             fake_args[][32] =
+	{
+		"D:\\default.xbe",      // mimic argv[0]
+		"-nomouse",             // FIXME: makes nxdk-sdl hang
+		"-numparticles", "512", // less particles is always good
+	};
 
-	xargv[0] = strdup("D:\\default.xbe"); // mimic argv[0]
+	// dump our fake args into xargv
+	for(xargc = 0; xargc < 100 && xargc < (int)(sizeof(fake_args) / sizeof(fake_args[0])); ++xargc)
+		xargv[xargc] = fake_args[xargc];
 
-	if(XGetLaunchInfo (&launchDataType, &launchData) == ERROR_SUCCESS)
+	if(xbox_GetLaunchData(&launchDataType, &launchData) == ERROR_SUCCESS)
 	{
 		// Command line from debugger
 		if(launchDataType == LDT_FROM_DEBUGGER_CMDLINE) 
 			xbox_PrepareArgs((char*)((PLD_FROM_DEBUGGER_CMDLINE)&launchData)->szCmdLine, xargv, xargc);
 		// Command line from homebrew dashboards (XBMC, etc.)
-		else if(launchDataType == LDT_TITLE && ((PCUSTOM_LAUNCH_DATA)&launchData)->magic == CUSTOM_LAUNCH_MAGIC)
+		else if((launchDataType == LDT_TITLE || launchDataType == LDT_FROM_DASHBOARD) && ((PCUSTOM_LAUNCH_DATA)&launchData)->magic == CUSTOM_LAUNCH_MAGIC)
 			xbox_PrepareArgs((char*)((PCUSTOM_LAUNCH_DATA)&launchData)->szFilename, xargv, xargc);
 		// Command line from Agar application (AG_Odalaunch)
 		else if(launchDataType == LDT_TITLE && ((PAG_LAUNCH_DATA)&launchData)->magic == AG_LAUNCH_MAGIC)
@@ -616,14 +657,31 @@ void  __cdecl main()
 		}
 	}
 
+	// our SDL2_mixer is new enough for this
+	// assume the config also uses D:\ for current directory
+	Mix_SetTimidityCfg("D:\\timidity.cfg");
+
+	xbox_CheckArgs(xargc, xargv);
+
+	if(Xbox_VidMode == 1080)
+		XVideoSetMode(1920, 1080, 32, REFRESH_DEFAULT);
+	else if(Xbox_VidMode == 720)
+		XVideoSetMode(1280, 720, 32, REFRESH_DEFAULT);
+	else
+		XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
+
 	xbox_MountPartitions();
 
 	xbox_InitNet();
+
+	xbox_PrintMemoryDebug();
 
 	if(Xbox_RROD)
 		xbox_EnableCustomLED();
 
 	I_Main(xargc, xargv); // Does not return
+
+	return 0;
 }
 
 #endif // _XBOX

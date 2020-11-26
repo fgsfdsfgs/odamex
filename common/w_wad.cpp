@@ -36,7 +36,9 @@
 #define strcmpi	strcasecmp
 #endif
 
+#ifndef _XBOX
 #include <fcntl.h>
+#endif
 
 #include "doomtype.h"
 #include "m_swap.h"

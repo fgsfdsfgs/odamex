@@ -102,7 +102,13 @@ int main(int argc, char *argv[])
 	// [AM] Set crash callbacks, so we get something useful from crashes.
 	I_SetCrashCallbacks();
 
-	try
+#if !defined(_DEBUG) && defined(_XBOX)
+	// our SEH implementation does not seem to support chaining __except blocks,
+	// so we nest them instead
+	ETRY()
+	{
+#endif
+	ETRY()
 	{
 #if defined(UNIX) && !defined(GEKKO)
 		if(!getuid() || !geteuid())
@@ -248,31 +254,34 @@ int main(int argc, char *argv[])
 		// proper termination needs to occur -- Hyper_Eye
 		call_terms ();
 	}
-	catch (CDoomError &error)
+	ECATCH_DOOMERROR()
 	{
 		if (LOG.is_open())
         {
-            LOG << error.GetMsg() << std::endl;
+            LOG << GET_EXCEPTION_MSG() << std::endl;
             LOG << std::endl;
         }
 
 #ifdef OSX
-		std::string errorMessage = error.GetMsg();
+		std::string errorMessage = GET_EXCEPTION_MSG();
 		CFStringRef macErrorMessage = CFStringCreateWithCString(NULL, errorMessage.c_str(), kCFStringEncodingMacRoman);
 		CFUserNotificationDisplayAlert(0, 0, NULL, NULL, NULL, CFSTR("Odamex Error"), macErrorMessage, CFSTR("OK"), NULL, NULL, NULL);
 		CFRelease(macErrorMessage);
 #elif !defined(WIN32)
-            fprintf(stderr, "%s\n", error.GetMsg().c_str());
+            fprintf(stderr, "%s\n", GET_EXCEPTION_MSG());
 #elif _XBOX
 		// Use future Xbox error message handling.    -- Hyper_Eye
 #else
-		MessageBox(NULL, error.GetMsg().c_str(), "Odamex Error", MB_OK);
+		MessageBox(NULL, GET_EXCEPTION_MSG(), "Odamex Error", MB_OK);
 #endif
 		call_terms();
 		exit(EXIT_FAILURE);
 	}
 #ifndef _DEBUG
-	catch (...)
+#ifdef _XBOX
+	}
+#endif
+	ECATCH_ANY()
 	{
 		// If an exception is thrown, be sure to do a proper shutdown.
 		// This is especially important if we are in fullscreen mode,
@@ -281,7 +290,7 @@ int main(int argc, char *argv[])
 		// goes wrong calling the cleanup functions.
 		call_terms ();
 		// Now let somebody who understands the exception deal with it.
-		throw;
+		ETHROW_RETHROW();
 	}
 #endif
 	return 0;

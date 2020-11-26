@@ -122,6 +122,7 @@ EXTERN_CVAR(vid_widescreen)
 EXTERN_CVAR(sv_allowwidescreen)
 EXTERN_CVAR(vid_vsync)
 EXTERN_CVAR(vid_pillarbox)
+EXTERN_CVAR(vid_writetotexture)
 
 static int vid_pillarbox_old = -1;
 
@@ -242,6 +243,13 @@ CVAR_FUNC_IMPL (vid_widescreen)
 CVAR_FUNC_IMPL(vid_pillarbox)
 {
 	if (gamestate != GS_STARTUP && V_CheckModeAdjustment())
+		V_ForceVideoModeAdjustment();
+}
+
+
+CVAR_FUNC_IMPL(vid_writetotexture)
+{
+	if (gamestate != GS_STARTUP)
 		V_ForceVideoModeAdjustment();
 }
 

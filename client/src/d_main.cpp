@@ -332,13 +332,13 @@ void D_DoomLoop (void)
 {
 	while (1)
 	{
-		try
+		ETRY()
 		{
 			D_RunTics(CL_RunTics, CL_DisplayTics);
 		}
-		catch (CRecoverableError &error)
+		ECATCH_RECOVERABLE()
 		{
-			Printf_Bold ("\n%s\n", error.GetMsg().c_str());
+			Printf_Bold ("\n%s\n", GET_EXCEPTION_MSG().c_str());
 
 			CL_QuitNetGame ();
 

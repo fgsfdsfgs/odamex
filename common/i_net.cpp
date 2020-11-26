@@ -36,11 +36,20 @@
 
 /* [Petteri] Use Winsock for Win32: */
 #include "win32inc.h"
-#ifdef _WIN32
-    #ifndef _XBOX
-    	#include <winsock2.h>
-        #include <ws2tcpip.h>
-    #endif // !_XBOX
+
+#if defined(_XBOX)
+extern "C"
+{
+#include <lwip/opt.h>
+#include <lwip/arch.h>
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
+#include <lwip/api.h>
+#include <lwip/errno.h>
+}
+#elif defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #else
 #ifdef GEKKO // Wii/GC
 #	include <network.h>
@@ -55,7 +64,7 @@
 #	include <errno.h>
 #	include <unistd.h>
 #	include <sys/time.h>
-#endif // WIN32
+#endif // _XBOX
 
 #ifndef _WIN32
 typedef int SOCKET;
@@ -82,6 +91,11 @@ typedef int SOCKET;
 #include "i_net.h"
 
 #ifdef _XBOX
+typedef int SOCKET;
+typedef unsigned int u_long;
+typedef unsigned short u_short;
+#define SOCKET_ERROR -1
+#define INVALID_SOCKET -1
 #include "i_xbox.h"
 #endif
 
@@ -361,7 +375,7 @@ void CloseNetwork (void)
 #endif
 
 	closesocket (inet_socket);
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
 	WSACleanup ();
 #endif
 }
@@ -435,7 +449,7 @@ bool NET_CompareAdr (netadr_t a, netadr_t b)
 	return false;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
 typedef int socklen_t;
 #endif
 
@@ -451,7 +465,7 @@ int NET_GetPacket (void)
 
 	if (ret == -1)
 	{
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
 		errno = WSAGetLastError();
 
 		if (errno == WSAEWOULDBLOCK)
@@ -506,7 +520,7 @@ int NET_SendPacket (buf_t &buf, netadr_t &to)
 
 	if (ret == -1)
 	{
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
 		  int err = WSAGetLastError();
 
 		  // wouldblock is silent
@@ -1070,7 +1084,7 @@ void InitNetCommon(void)
 {
    unsigned long _true = true;
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
    WSADATA   wsad;
    WSAStartup( MAKEWORD(2,2), &wsad );
 #endif
@@ -1082,6 +1096,14 @@ void InitNetCommon(void)
     #endif
 
    BindToLocalPort (inet_socket, localport);
+
+#ifdef _XBOX
+	// FIONBIO might currently be broken in LWIP
+	// so set timeout to 1ms just in case
+	const unsigned int rcvtimeo = 1;
+	setsockopt (inet_socket, SOL_SOCKET, SO_RCVTIMEO, SETSOCKOPTCAST(&rcvtimeo), sizeof(rcvtimeo));
+#endif
+
    if (ioctlsocket (inet_socket, FIONBIO, &_true) == -1)
        I_FatalError ("UDPsocket: ioctl FIONBIO: %s", strerror(errno));
 
@@ -1109,7 +1131,7 @@ bool NetWaitOrTimeout(size_t ms)
 	if(ret == 1)
 		return true;
 
-	#ifdef _WIN32
+	#if defined(_WIN32) && !defined(_XBOX)
 		// handle SOCKET_ERROR
 		if(ret == SOCKET_ERROR)
 			Printf(PRINT_HIGH, "select returned SOCKET_ERROR: %d\n", WSAGetLastError());

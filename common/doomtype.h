@@ -481,7 +481,7 @@ forceinline const palindex_t translationref_t::tlate(const byte c) const
 {
 	#if ODAMEX_DEBUG
 	if (m_table == NULL)
-		throw CFatalError("translationref_t::tlate() called with NULL m_table");
+		ETHROW_FATAL("translationref_t::tlate() called with NULL m_table");
 	#endif
 	return m_table[c];
 }
@@ -560,9 +560,9 @@ forceinline palindex_t shaderef_t::index(const palindex_t c) const
 {
 	#if ODAMEX_DEBUG
 	if (m_colors == NULL)
-		throw CFatalError("shaderef_t::index(): Bad shaderef_t");
+		ETHROW_FATAL("shaderef_t::index(): Bad shaderef_t");
 	if (m_colors->colormap == NULL)
-		throw CFatalError("shaderef_t::index(): colormap == NULL!");
+		ETHROW_FATAL("shaderef_t::index(): colormap == NULL!");
 	#endif
 
 	return m_colormap[c];
@@ -572,9 +572,9 @@ forceinline argb_t shaderef_t::shade(const palindex_t c) const
 {
 	#if ODAMEX_DEBUG
 	if (m_colors == NULL)
-		throw CFatalError("shaderef_t::shade(): Bad shaderef_t");
+		ETHROW_FATAL("shaderef_t::shade(): Bad shaderef_t");
 	if (m_colors->shademap == NULL)
-		throw CFatalError("shaderef_t::shade(): shademap == NULL!");
+		ETHROW_FATAL("shaderef_t::shade(): shademap == NULL!");
 	#endif
 
 	return m_shademap[c];

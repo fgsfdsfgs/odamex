@@ -35,17 +35,17 @@
 
 #include "win32inc.h"
 #ifdef _WIN32
-    #include <io.h>
-    #include <direct.h>
-    #include <process.h>
+		#include <io.h>
+		#include <direct.h>
+		#include <process.h>
 
-    #ifdef _XBOX
-        #include <xtl.h>
-    #else
-        #include <shlwapi.h>
-		#include <winsock2.h>
-		#include <mmsystem.h>
-    #endif // !_XBOX
+		#ifdef _XBOX
+			// don't actually need anything here
+		#else
+			#include <shlwapi.h>
+			#include <winsock2.h>
+			#include <mmsystem.h>
+		#endif // !_XBOX
 #endif // WIN32
 
 #ifdef UNIX
@@ -66,11 +66,13 @@
 #include <stdarg.h>
 #include <sys/types.h>
 
-#ifndef __OpenBSD__
+#if !defined(__OpenBSD__) && !defined(_XBOX)
 	#include <sys/timeb.h>
 #endif
 
-#include <sys/stat.h>
+#if !defined(_XBOX)
+	#include <sys/stat.h>
+#endif
 
 #include "errors.h"
 
@@ -232,7 +234,7 @@ dtime_t I_GetTime()
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return ts.tv_sec * 1000LL * 1000LL * 1000LL + ts.tv_nsec;
 
-#elif defined WIN32 && !defined _XBOX
+#elif defined WIN32
 	static bool initialized = false;
 	static LARGE_INTEGER initial_count;
 	static double nanoseconds_per_count;
@@ -711,7 +713,7 @@ NORETURN void STACK_ARGS I_FatalError (const char *error, ...)
 		sprintf (errortext + index, "\nSDL_GetError = \"%s\"", SDL_GetError());
 		va_end (argptr);
 
-		throw CFatalError (errortext);
+		ETHROW_FATAL (errortext);
 	}
 
 	if (!has_exited)	// If it hasn't exited yet, exit now -- killough
@@ -743,7 +745,7 @@ void STACK_ARGS I_Error (const char *error, ...)
 	vsprintf (errortext, error, argptr);
 	va_end (argptr);
 
-	throw CRecoverableError (errortext);
+	ETHROW_RECOVERABLE (errortext);
 }
 
 void STACK_ARGS I_Warning(const char *warning, ...)

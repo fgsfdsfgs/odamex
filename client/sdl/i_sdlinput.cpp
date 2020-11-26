@@ -569,10 +569,8 @@ ISDL12JoystickInputDevice::~ISDL12JoystickInputDevice()
 
 	SDL_JoystickEventState(SDL_IGNORE);
 
-	#ifndef _XBOX // This is to avoid a bug in SDLx
 	if (mJoystick != NULL)
 		SDL_JoystickClose(mJoystick);
-	#endif
 
 	delete [] mHatStates;
 }
@@ -1645,6 +1643,11 @@ void ISDL20JoystickInputDevice::gatherEvents()
 				button_event.type = (sdl_ev.type == SDL_JOYBUTTONDOWN) ? ev_keydown : ev_keyup;
 				button_event.data1 = sdl_ev.jbutton.button + KEY_JOY1;
 				mEvents.push(button_event);
+#ifdef _XBOX // REMOVEME
+				extern void xbox_Reboot();
+				if (sdl_ev.jbutton.button == 6)
+					xbox_Reboot();
+#endif
 			}
 			else if (sdl_ev.type == SDL_JOYAXISMOTION && sdl_ev.jaxis.which == mJoystickId)
 			{

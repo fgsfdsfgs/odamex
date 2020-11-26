@@ -80,7 +80,7 @@ public:
 	inline T* operator ->()
 	{
 		if(!naive || !*naive)
-			throw CRecoverableError("szp pointer was NULL");
+			ETHROW_FATAL("szp pointer was NULL");
 
 		return *naive;
 	}
@@ -98,7 +98,7 @@ public:
 	void update_all(T *target)
 	{
 		if(!naive)
-			throw CRecoverableError("szp pointer was NULL on update_all");
+			ETHROW_FATAL("szp pointer was NULL on update_all");
 		
 		// all copies already have naive, so their pointers will update too
 		*naive = target;

@@ -55,6 +55,7 @@
 EXTERN_CVAR (vid_fullscreen)
 EXTERN_CVAR (vid_widescreen)
 EXTERN_CVAR (vid_pillarbox)
+EXTERN_CVAR (vid_writetotexture)
 
 
 // ****************************************************************************
@@ -1042,9 +1043,25 @@ ISDL20TextureWindowSurfaceManager::ISDL20TextureWindowSurfaceManager(
 	if (mSDLTexture == NULL)
 		I_FatalError("I_InitVideo: unable to create SDL2 texture: %s\n", SDL_GetError());
 
-	mSurface = new IWindowSurface(width, height, &mFormat);
-    if (mSurface->getBitsPerPixel() ==8)
-        m8bppTo32BppSurface = new IWindowSurface(width, height, mWindow->getPixelFormat());
+	void *tbuffer = NULL;
+	int tpitch = 0;
+	if (vid_writetotexture)
+	{
+		// If the platform allows it, write directly to the texture instead of copying pixels around.
+		// This is technically very wrong, but e.g. nxdk-sdl2 allows this just fine
+		SDL_LockTexture(mSDLTexture, NULL, &tbuffer, &tpitch);
+		SDL_UnlockTexture(mSDLTexture);
+	}
+
+	if (mFormat.getBitsPerPixel() == 8)
+	{
+		mSurface = new IWindowSurface(width, height, &mFormat);
+		m8bppTo32BppSurface = new IWindowSurface(width, height, mWindow->getPixelFormat(), tbuffer, tpitch);
+	}
+	else
+	{
+		mSurface = new IWindowSurface(width, height, &mFormat, tbuffer, tpitch);
+	}
 }
 
 
@@ -1108,16 +1125,17 @@ void ISDL20TextureWindowSurfaceManager::startRefresh()
 //
 void ISDL20TextureWindowSurfaceManager::finishRefresh()
 {
-    if (mSurface->getBitsPerPixel() == 8)
-    {
-        m8bppTo32BppSurface->blit(mSurface, 0, 0, mSurface->getWidth(), mSurface->getHeight(),
-                0, 0, m8bppTo32BppSurface->getWidth(), m8bppTo32BppSurface->getHeight());
-	    SDL_UpdateTexture(mSDLTexture, NULL, m8bppTo32BppSurface->getBuffer(), m8bppTo32BppSurface->getPitch());
-    }
-    else
-    {
-	   SDL_UpdateTexture(mSDLTexture, NULL, mSurface->getBuffer(), mSurface->getPitch());
-    }
+	if (mSurface->getBitsPerPixel() == 8)
+	{
+		m8bppTo32BppSurface->blit(mSurface, 0, 0, mSurface->getWidth(), mSurface->getHeight(),
+			0, 0, m8bppTo32BppSurface->getWidth(), m8bppTo32BppSurface->getHeight());
+		if (!vid_writetotexture) // we've already been writing directly to it
+			SDL_UpdateTexture(mSDLTexture, NULL, m8bppTo32BppSurface->getBuffer(), m8bppTo32BppSurface->getPitch());
+	}
+	else if (!vid_writetotexture) // we've already been writing directly to it
+	{
+		SDL_UpdateTexture(mSDLTexture, NULL, mSurface->getBuffer(), mSurface->getPitch());
+	}
 
 	if (mDrawLogicalRect)
 		SDL_RenderCopy(mSDLRenderer, mSDLTexture, NULL, &mLogicalRect);
@@ -1202,7 +1220,18 @@ ISDL20Window::~ISDL20Window()
 void ISDL20Window::setRendererDriver()
 {
 	// Preferred ordering of drivers
-	const char* drivers[] = {"direct3d", "opengl", "opengles2", "opengles", "software", ""};
+	const char* drivers[] =
+	{
+#if 0
+		"xbox_pbkit",
+#endif
+		"direct3d",
+		"opengl",
+		"opengles2",
+		"opengles",
+		"software",
+		""
+	};
 
 	for (int i = 0; drivers[i][0] != '\0'; i++)
 	{

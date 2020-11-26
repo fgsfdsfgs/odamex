@@ -27,7 +27,16 @@
 
 /* Need to do this here because intrin.h has C++ code in it */
 /* Visual Studio 2005 has a bug where intrin.h conflicts with winnt.h */
-#if defined(_MSC_VER) && (_MSC_VER >= 1500) && !defined(_WIN32_WCE)
+#if defined(_XBOX)
+	#include <intrin.h>
+	// __MMX__ and __SSE__ already defined, but just in case
+	#ifndef __MMX__
+		#define __MMX__
+	#endif
+	#ifndef __SSE__
+		#define __SSE__
+	#endif
+#elif defined(_MSC_VER) && (_MSC_VER >= 1500) && !defined(_WIN32_WCE)
 	#include <intrin.h>
 	#ifndef _WIN64
 		#define __MMX__

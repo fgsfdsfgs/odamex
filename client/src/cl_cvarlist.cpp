@@ -635,6 +635,14 @@ CVAR_FUNC_DECL(	vid_widescreen, "0", "Use wide field-of-view with widescreen vid
 CVAR_FUNC_DECL(vid_pillarbox, "0", "Pillarbox 4:3 resolutions in widescreen",
 				CVARTYPE_BOOL, CVAR_CLIENTARCHIVE)
 
+#ifdef _XBOX
+CVAR_FUNC_DECL(vid_writetotexture, "1", "Write pixels directly to the SDL texture",
+				CVARTYPE_BOOL, CVAR_CLIENTARCHIVE)
+#else
+CVAR_FUNC_DECL(vid_writetotexture, "0", "Write pixels directly to the SDL texture",
+				CVARTYPE_BOOL, CVAR_CLIENTARCHIVE)
+#endif
+
 CVAR(			vid_autoadjust, "1", "Force fullscreen resolution to the closest available video mode.",
 				CVARTYPE_BOOL, CVAR_CLIENTARCHIVE)
 
